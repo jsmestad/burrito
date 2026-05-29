@@ -1,13 +1,11 @@
 const std = @import("std");
 
 const builtin = @import("builtin");
-const fs = std.fs;
+const Io = std.Io;
 const log = std.log;
 const metadata = @import("metadata.zig");
-const win_asni = @cImport(@cInclude("win_ansi_fix.h"));
 
 const MetaStruct = metadata.MetaStruct;
-const EnvMap = std.process.EnvMap;
 
 const MAX_READ_SIZE = 256;
 
@@ -19,38 +17,31 @@ fn get_erl_exe_name() []const u8 {
     }
 }
 
-pub fn launch(install_dir: []const u8, env_map: *EnvMap, meta: *const MetaStruct, self_path: []const u8, args_trimmed: []const []const u8) !void {
+pub fn launch(io: Io, install_dir: []const u8, env_map: *std.process.Environ.Map, meta: *const MetaStruct, self_path: []const u8, args_trimmed: []const []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
 
-    // Computer directories we care about
-    const release_cookie_path = try fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", "COOKIE" });
-    const release_lib_path = try fs.path.join(allocator, &[_][]const u8{ install_dir, "lib" });
-    const install_vm_args_path = try fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", meta.app_version, "vm.args" });
-    const config_sys_path = try fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", meta.app_version, "sys.config" });
-    const config_sys_path_no_ext = try fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", meta.app_version, "sys" });
-    const rel_vsn_dir = try fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", meta.app_version });
-    const boot_path = try fs.path.join(allocator, &[_][]const u8{ rel_vsn_dir, "start" });
+    const release_cookie_path = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", "COOKIE" });
+    const release_lib_path = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "lib" });
+    const install_vm_args_path = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", meta.app_version, "vm.args" });
+    const config_sys_path = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", meta.app_version, "sys.config" });
+    const config_sys_path_no_ext = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", meta.app_version, "sys" });
+    const rel_vsn_dir = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", meta.app_version });
+    const boot_path = try std.fs.path.join(allocator, &[_][]const u8{ rel_vsn_dir, "start" });
 
     const erts_version_name = try std.fmt.allocPrint(allocator, "erts-{s}", .{meta.erts_version});
-    const erts_bin_path = try fs.path.join(allocator, &[_][]const u8{ install_dir, erts_version_name, "bin" });
-    const erl_bin_path = try fs.path.join(allocator, &[_][]const u8{ erts_bin_path, get_erl_exe_name() });
+    const erts_bin_path = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, erts_version_name, "bin" });
+    const erl_bin_path = try std.fs.path.join(allocator, &[_][]const u8{ erts_bin_path, get_erl_exe_name() });
 
-    // Read the Erlang COOKIE file for the release
-    const release_cookie_file = try fs.openFileAbsolute(release_cookie_path, .{ .mode = .read_write });
-    var release_cookie_content = try release_cookie_file.readToEndAlloc(allocator, MAX_READ_SIZE);
+    const release_cookie_file = try Io.Dir.openFileAbsolute(io, release_cookie_path, .{ .mode = .read_write });
+    defer release_cookie_file.close(io);
+    var read_buf: [1024]u8 = undefined;
+    var cookie_reader = release_cookie_file.reader(io, &read_buf);
+    var release_cookie_content: []const u8 = try cookie_reader.interface.allocRemaining(allocator, @enumFromInt(MAX_READ_SIZE));
 
-    // Override the cookie if the env variable RELEASE_COOKIE is defined
-    const maybe_cookie = std.process.getEnvVarOwned(allocator, "RELEASE_COOKIE") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        else => return err,
-    };
-
-    if (maybe_cookie) |cookie| {
+    if (env_map.get("RELEASE_COOKIE")) |cookie| {
         release_cookie_content = cookie;
     }
-
-    // Set all the required release arguments
 
     const erlang_cli = &[_][]const u8{
         erl_bin_path[0..],
@@ -73,8 +64,6 @@ pub fn launch(install_dir: []const u8, env_map: *EnvMap, meta: *const MetaStruct
     };
 
     if (builtin.os.tag == .windows) {
-        // Fix up Windows 10+ consoles having ANSI escape support, but only if we set some flags
-        win_asni.enable_virtual_term();
         const final_args = try std.mem.concat(allocator, []const u8, &.{ erlang_cli, args_trimmed });
 
         try env_map.put("RELEASE_ROOT", install_dir);
@@ -101,33 +90,24 @@ pub fn launch(install_dir: []const u8, env_map: *EnvMap, meta: *const MetaStruct
 
         log.debug("CLI List: {any}", .{final_args});
 
-        var erl_env_map = EnvMap.init(allocator);
-        defer erl_env_map.deinit();
+        try env_map.put("ROOTDIR", install_dir[0..]);
+        try env_map.put("BINDIR", erts_bin_path[0..]);
+        try env_map.put("RELEASE_ROOT", install_dir);
+        try env_map.put("RELEASE_SYS_CONFIG", config_sys_path_no_ext);
+        try env_map.put("__BURRITO", "1");
+        try env_map.put("__BURRITO_BIN_PATH", self_path);
 
-        var env_map_it = env_map.iterator();
-        while (env_map_it.next()) |entry| {
-            const key = entry.key_ptr.*;
-            const val = entry.value_ptr.*;
-            try erl_env_map.put(key, val);
-        }
-
-        try erl_env_map.put("ROOTDIR", install_dir[0..]);
-        try erl_env_map.put("BINDIR", erts_bin_path[0..]);
-        try erl_env_map.put("RELEASE_ROOT", install_dir);
-        try erl_env_map.put("RELEASE_SYS_CONFIG", config_sys_path_no_ext);
-        try erl_env_map.put("__BURRITO", "1");
-        try erl_env_map.put("__BURRITO_BIN_PATH", self_path);
-
-        // Extend LD_LIBRARY_PATH so NIF .so files can find system shared
-        // libraries (e.g. libgcc_s.so.1) when using a custom glibc ERTS
         const system_lib_paths = "/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib:/usr/lib";
-        if (erl_env_map.get("LD_LIBRARY_PATH")) |existing| {
+        if (env_map.get("LD_LIBRARY_PATH")) |existing| {
             const combined = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ existing, system_lib_paths });
-            try erl_env_map.put("LD_LIBRARY_PATH", combined);
+            try env_map.put("LD_LIBRARY_PATH", combined);
         } else {
-            try erl_env_map.put("LD_LIBRARY_PATH", system_lib_paths);
+            try env_map.put("LD_LIBRARY_PATH", system_lib_paths);
         }
 
-        return std.process.execve(allocator, final_args, &erl_env_map);
+        return std.process.replace(io, .{
+            .argv = final_args,
+            .environ_map = env_map,
+        });
     }
 }

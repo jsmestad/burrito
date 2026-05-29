@@ -2,7 +2,7 @@ defmodule Burrito do
   alias Burrito.Builder
   alias Burrito.Builder.Log
 
-  @zig_version_expected %Version{major: 0, minor: 15, patch: 2}
+  @zig_version_expected %Version{major: 0, minor: 16, patch: 0}
   @openssl_version %Version{major: 3, minor: 5, patch: 1}
   @musl_version %Version{major: 1, minor: 2, patch: 5}
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 
 pub fn query(comptime message: []const u8, args: anytype) void {
     printToStdout("[?] " ++ message, args);
@@ -26,7 +27,7 @@ pub fn crit(comptime message: []const u8, args: anytype) void {
 
 fn printToStdout(comptime message: []const u8, args: anytype) void {
     var stdout_buf: [64]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = Io.File.stdout().writer(std.Options.debug_io, &stdout_buf);
     const stdout = &stdout_writer.interface;
 
     stdout.print(message, args) catch {};
@@ -35,7 +36,7 @@ fn printToStdout(comptime message: []const u8, args: anytype) void {
 
 fn printToStderr(comptime message: []const u8, args: anytype) void {
     var stderr_buf: [64]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+    var stderr_writer = Io.File.stderr().writer(std.Options.debug_io, &stderr_buf);
     const stderr = &stderr_writer.interface;
 
     stderr.print(message, args) catch {};

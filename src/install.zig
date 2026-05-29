@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const metadata = @import("metadata.zig");
 const MetaStruct = metadata.MetaStruct;
 
@@ -12,16 +13,18 @@ pub const Install = struct {
     version: std.SemanticVersion = undefined,
 };
 
-pub fn load_install_from_path(allocator: std.mem.Allocator, full_install_path: []const u8) !?Install {
+pub fn load_install_from_path(io: Io, allocator: std.mem.Allocator, full_install_path: []const u8) !?Install {
     const metadata_file_path = try std.fs.path.join(allocator, &[_][]const u8{ full_install_path, "_metadata.json" });
-    const metadata_file = std.fs.openFileAbsolute(metadata_file_path, .{}) catch {
+    const metadata_file = Io.Dir.openFileAbsolute(io, metadata_file_path, .{}) catch {
         std.log.err("Failed to load the metadata file: {s}", .{metadata_file_path});
         return null;
     };
 
-    defer metadata_file.close();
+    defer metadata_file.close(io);
 
-    const content = try metadata_file.readToEndAlloc(allocator, MAX_READ_SIZE);
+    var read_buf: [1024]u8 = undefined;
+    var file_reader = metadata_file.reader(io, &read_buf);
+    const content = try file_reader.interface.allocRemaining(allocator, @enumFromInt(MAX_READ_SIZE));
     const metadata_struct = metadata.parse(allocator, content);
 
     if (metadata_struct == null) {
