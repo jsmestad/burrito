@@ -9,11 +9,14 @@ const Io = std.Io;
 const Sha1 = std.crypto.hash.Sha1;
 const Base64 = std.base64.url_safe_no_pad.Encoder;
 
+// Foilz Archive Util
 const foilz = @import("archiver.zig");
 
+// Maint utils
 const logger = @import("logger.zig");
 const maint = @import("maintenance.zig");
 
+// Install dir suffix
 const install_suffix = ".burrito";
 
 const plugin = @import("burrito_plugin");
@@ -23,9 +26,11 @@ const MetaStruct = metadata.MetaStruct;
 
 const IS_LINUX = builtin.os.tag == .linux;
 
+// Payload
 pub const FOILZ_PAYLOAD = @embedFile("payload.foilz.xz");
 pub const RELEASE_METADATA_JSON = @embedFile("_metadata.json");
 
+// Windows cmd argument parser
 const windows = std.os.windows;
 const LPCWSTR = windows.LPCWSTR;
 const LPWSTR = windows.LPWSTR;
@@ -35,20 +40,24 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     const args = try init.minimal.args.toSlice(arena);
+    // Trim args to only what we actually want to pass to erlang
     const args_trimmed = args[1..];
 
     const environ = init.minimal.environ;
 
+    // If on linux, maybe install the musl libc runtime file for our pre-compiled Erlang
     try maybe_install_musl_runtime(io, arena);
 
     const self_path = try std.process.executablePathAlloc(io, arena);
 
+    // If this is not a production build, we always want a clean install
     const wants_clean_install = !build_options.IS_PROD;
 
     const meta = metadata.parse(arena, RELEASE_METADATA_JSON).?;
     const install_dir = try get_install_dir(io, environ, arena, &meta);
     const metadata_path = try std.fs.path.join(arena, &.{ install_dir, "_metadata.json" });
 
+    // Check for maintenance commands
     if (args_trimmed.len > 0 and std.mem.eql(u8, args_trimmed[0], "maintenance")) {
         try maint.do_maint(io, args_trimmed[1..], install_dir);
         return;
@@ -58,8 +67,10 @@ pub fn main(init: std.process.Init) !void {
     log.debug("Install Directory: {s}", .{install_dir});
     log.debug("Metadata path: {s}", .{metadata_path});
 
+    // Ensure the destination directory is created
     try Io.Dir.cwd().createDirPath(io, install_dir);
 
+    // If the metadata file exists, don't install again
     var needs_install: bool = false;
     Io.Dir.cwd().access(io, metadata_path, .{}) catch |err| {
         if (err == error.FileNotFound) {
@@ -72,9 +83,14 @@ pub fn main(init: std.process.Init) !void {
 
     log.debug("Passing args string: {any}", .{args_trimmed});
 
+    // Execute plugin code
     plugin.burrito_plugin_entry(install_dir, RELEASE_METADATA_JSON);
 
+    // If we need an install, install the payload onto the target machine
     if (needs_install or wants_clean_install) {
+        // If running a clean install (probably a debug build)
+        // delete existing install directory if it's present to prevent a MacOS SIP issue
+        // when "replacing" a mach-o in place
         if (wants_clean_install and !needs_install) {
             try Io.Dir.cwd().deleteTree(io, install_dir);
             try Io.Dir.cwd().createDirPath(io, install_dir);
@@ -85,11 +101,14 @@ pub fn main(init: std.process.Init) !void {
         log.debug("Skipping archive unpacking, this machine already has the app installed!", .{});
     }
 
+    // Clean up older versions
     const base_install_path = try get_base_install_dir(io, environ, arena);
     try maint.do_clean_old_versions(io, base_install_path, install_dir);
 
+    // Get Env
     var env_map = try std.process.Environ.createMap(init.minimal.environ, arena);
 
+    // Add _IS_TTY env variable
     if (try Io.File.stdout().isTty(io)) {
         try env_map.put("_IS_TTY", "1");
     } else {
@@ -102,13 +121,17 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn do_payload_install(io: Io, arena: std.mem.Allocator, install_dir: []const u8, metadata_path: []const u8) !void {
+    // Unpack the files
     try foilz.unpack_files(io, arena, FOILZ_PAYLOAD, install_dir, build_options.UNCOMPRESSED_SIZE);
 
+    // Write metadata file
     const file = try Io.Dir.cwd().createFile(io, metadata_path, .{ .truncate = true });
     defer file.close(io);
     try file.writePositionalAll(io, RELEASE_METADATA_JSON, 0);
 }
 
+// If we have a override for the install path, use that, otherwise, continue to return
+// the standard install path
 fn get_base_install_dir(_: Io, environ: std.process.Environ, arena: std.mem.Allocator) ![]const u8 {
     const upper_name = try std.ascii.allocUpperString(arena, build_options.RELEASE_NAME);
     const env_install_dir_name = try std.fmt.allocPrint(arena, "{s}_INSTALL_DIR", .{upper_name});
@@ -154,19 +177,23 @@ fn get_app_data_dir(arena: std.mem.Allocator, appname: []const u8) ![]const u8 {
 }
 
 fn get_install_dir(io: Io, environ: std.process.Environ, arena: std.mem.Allocator, meta: *const MetaStruct) ![]u8 {
+    // Combine the hash of the payload and a base dir to get a safe install directory
     const base_install_path = try get_base_install_dir(io, environ, arena);
 
+    // Parse the ERTS version and app version from the metadata JSON string
     const dir_name = try std.fmt.allocPrint(
         arena,
         "{s}_erts-{s}_{s}",
         .{ build_options.RELEASE_NAME, meta.erts_version, meta.app_version },
     );
 
+    // Ensure that base directory is created
     Io.Dir.cwd().createDirPath(io, base_install_path) catch {
         install_dir_error(arena);
         return "";
     };
 
+    // Construct the full app install path
     const name = std.fs.path.join(arena, &.{ base_install_path, dir_name }) catch {
         install_dir_error(arena);
         return "";
@@ -193,11 +220,13 @@ fn install_dir_error(arena: std.mem.Allocator) void {
 
 fn maybe_install_musl_runtime(io: Io, arena: std.mem.Allocator) !void {
     if (comptime IS_LINUX and !std.mem.eql(u8, build_options.MUSL_RUNTIME_PATH, "")) {
+        // Check if the file was already extracted
         const cStr = try arena.dupeZ(u8, build_options.MUSL_RUNTIME_PATH);
         var statBuffer: std.c.Stat = undefined;
         const statResult = std.c.stat(cStr, &statBuffer);
 
         if (statResult == 0) {
+            // File exists
             log.debug("The musl runtime file is already preset. Continuing.", .{});
             return;
         }

@@ -1,3 +1,35 @@
+/////
+// This is a packing/unpacking utility used to pack up a elixir mix release into "FOILZ" archive.
+// The structure of the FOILZ archive file is very simple, and akin to a very basic TAR archive:
+//
+//                           ┌────────────────────────┐
+//                           │                        │
+//                           │  Magic Header: 'FOILZ' │
+//                           │                        │
+//                           ├────────────────────────┤
+//                 ┌──────── │  u64  File Path Len    │◄───────── Informs how long the string following will be
+//                 │         ├────────────────────────┤
+//                 │         │                        │
+//                 │         │  File Path Characters  │◄───────── File path in release dir + file name
+// File Record ────┤         │                        │
+//                 │         ├────────────────────────┤
+//                 │         │  u64  File Byte Len    │◄───────── Informs how long the file bytes following will be
+//                 │         ├────────────────────────┤
+//                 │         │                        │
+//                 │         │       File Bytes       │◄───────── Raw bytes of file
+//                 │         │                        │
+//                 │         ├────────────────────────┤
+//                 └──────── │   usize   File Mode    │◄───────── POSIX File Mode (Ignored on Windows)
+//                           ├────────────────────────┤
+//                           │                        │
+//                           │ Magic Trailer: 'FOILZ' │
+//                           │                        │
+//                           └────────────────────────┘
+//
+// There can be many file records inside a FOILZ archive, after packing, it is gzip or xz compressed.
+// At runtime, we decompress it in memory and write the files to disk in a common location.
+/////
+
 const builtin = @import("builtin");
 const std = @import("std");
 
@@ -15,6 +47,7 @@ const MAX_READ_SIZE = 1000000000;
 pub fn pack_directory(arena: Allocator, path: []const u8, archive_path: []const u8) anyerror!void {
     const io = std.Options.debug_io;
 
+    // Open a file for the archive
     const arch_file = try Io.Dir.cwd().createFile(io, archive_path, .{ .truncate = true });
     defer arch_file.close(io);
 
@@ -34,6 +67,9 @@ pub fn pack_directory(arena: Allocator, path: []const u8, archive_path: []const 
 
     while (try walker.next(io)) |entry| {
         if (entry.kind == .file) {
+            // Replace some path string data for the tar index name
+            // specifically replace: '../_build/prod/rel/' --> ''
+            // This just makes it easier to write the files out later on the destination machine
             const needle = path;
             const replacement = "";
             const replacement_size = mem.replacementSize(u8, entry.path, needle, replacement);
@@ -50,6 +86,7 @@ pub fn pack_directory(arena: Allocator, path: []const u8, archive_path: []const 
 
             const stat = try file.stat(io);
 
+            // Write file record to archive
             const name = index;
             try writer.writeInt(u64, name.len, .little);
             try writer.writeAll(name);
@@ -73,6 +110,7 @@ pub fn pack_directory(arena: Allocator, path: []const u8, archive_path: []const 
 }
 
 pub fn unpack_files(io: Io, arena: Allocator, data: []const u8, dest_path: []const u8, uncompressed_size: u64) !void {
+    // Decompress the data in the payload
     var decompressed: []u8 = try arena.alloc(u8, uncompressed_size);
 
     var xz_buffer: xz.xz_buf = .{
@@ -94,36 +132,53 @@ pub fn unpack_files(io: Io, arena: Allocator, data: []const u8, dest_path: []con
         return error.ParseError;
     }
 
+    // Validate the header of the payload
     if (!std.mem.eql(u8, MAGIC, decompressed[0..5])) {
         return error.BadHeader;
     }
 
+    // We start at position 5 to skip the header
     var cursor: u64 = 5;
     var file_count: u64 = 0;
 
+    //////
+    // Read until we reach the end of the trailer
+    // Look ahead 5 bytes and see
     while (cursor < decompressed.len - 5) {
+        //////
+        // Read the file name
         const string_len = std.mem.readInt(u64, decompressed[cursor .. cursor + @sizeOf(u64)][0..8], .little);
         cursor = cursor + @sizeOf(u64);
 
         const file_name = decompressed[cursor .. cursor + string_len];
         cursor = cursor + string_len;
 
+        //////
+        // Read the file data from the payload
         const file_len = std.mem.readInt(u64, decompressed[cursor .. cursor + @sizeOf(u64)][0..8], .little);
         cursor = cursor + @sizeOf(u64);
 
         const file_data = decompressed[cursor .. cursor + file_len];
         cursor = cursor + file_len;
 
+        //////
+        // Read the mode for this file
         const file_mode = std.mem.readInt(usize, decompressed[cursor .. cursor + @sizeOf(usize)][0..@sizeOf(usize)], .little);
         cursor = cursor + @sizeOf(usize);
 
+        //////
+        // Write the file
         const full_file_path = try std.fs.path.join(arena, &[_][]const u8{ dest_path[0..], file_name });
 
+        //////
+        // Create any directories needed
         const dir_name = std.fs.path.dirname(file_name);
         if (dir_name != null) try create_dirs(io, dest_path[0..], dir_name.?, arena);
 
         log.debug("Unpacked File: {s}", .{full_file_path});
 
+        //////
+        // Write the file to disk!
         {
             const file = try Io.Dir.cwd().createFile(io, full_file_path, .{ .truncate = true });
             if (file_len > 0) {
@@ -160,6 +215,7 @@ fn create_dirs(io: Io, dest_path: []const u8, sub_dir_names: []const u8, allocat
     }
 }
 
+// Adapted from `std.log`, but without forcing a newline
 fn direct_log(comptime message: []const u8, args: anytype) void {
     var buf: [64]u8 = undefined;
     var w = Io.File.stderr().writer(std.Options.debug_io, &buf);

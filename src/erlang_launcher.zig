@@ -21,6 +21,7 @@ pub fn launch(io: Io, install_dir: []const u8, env_map: *std.process.Environ.Map
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
 
+    // Computer directories we care about
     const release_cookie_path = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", "COOKIE" });
     const release_lib_path = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "lib" });
     const install_vm_args_path = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", meta.app_version, "vm.args" });
@@ -33,16 +34,19 @@ pub fn launch(io: Io, install_dir: []const u8, env_map: *std.process.Environ.Map
     const erts_bin_path = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, erts_version_name, "bin" });
     const erl_bin_path = try std.fs.path.join(allocator, &[_][]const u8{ erts_bin_path, get_erl_exe_name() });
 
+    // Read the Erlang COOKIE file for the release
     const release_cookie_file = try Io.Dir.openFileAbsolute(io, release_cookie_path, .{ .mode = .read_write });
     defer release_cookie_file.close(io);
     var read_buf: [1024]u8 = undefined;
     var cookie_reader = release_cookie_file.reader(io, &read_buf);
     var release_cookie_content: []const u8 = try cookie_reader.interface.allocRemaining(allocator, @enumFromInt(MAX_READ_SIZE));
 
+    // Override the cookie if the env variable RELEASE_COOKIE is defined
     if (env_map.get("RELEASE_COOKIE")) |cookie| {
         release_cookie_content = cookie;
     }
 
+    // Set all the required release arguments
     const erlang_cli = &[_][]const u8{
         erl_bin_path[0..],
         "-elixir ansi_enabled true",
@@ -64,6 +68,7 @@ pub fn launch(io: Io, install_dir: []const u8, env_map: *std.process.Environ.Map
     };
 
     if (builtin.os.tag == .windows) {
+        // Fix up Windows 10+ consoles having ANSI escape support, but only if we set some flags
         const final_args = try std.mem.concat(allocator, []const u8, &.{ erlang_cli, args_trimmed });
 
         try env_map.put("RELEASE_ROOT", install_dir);
@@ -97,6 +102,8 @@ pub fn launch(io: Io, install_dir: []const u8, env_map: *std.process.Environ.Map
         try env_map.put("__BURRITO", "1");
         try env_map.put("__BURRITO_BIN_PATH", self_path);
 
+        // Extend LD_LIBRARY_PATH so NIF .so files can find system shared
+        // libraries (e.g. libgcc_s.so.1) when using a custom glibc ERTS
         const system_lib_paths = "/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib:/usr/lib";
         if (env_map.get("LD_LIBRARY_PATH")) |existing| {
             const combined = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ existing, system_lib_paths });

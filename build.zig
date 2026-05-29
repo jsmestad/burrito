@@ -7,6 +7,7 @@ const log = std.log;
 pub fn build(b: *std.Build) !void {
     log.info("Zig is building an Elixir binary... ⚡", .{});
 
+    // Run build steps!
     try run_archiver(b);
     try build_wrapper(b);
 
@@ -78,6 +79,7 @@ pub fn build_wrapper(b: *std.Build) !void {
         wrapper_exe.root_module.addIncludePath(b.path("src/"));
     }
 
+    // Link standard C libary to the wrapper
     wrapper_exe.root_module.linkSystemLibrary("c", .{});
 
     if (plugin_path) |plugin| {
