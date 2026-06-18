@@ -46,13 +46,30 @@ pub fn launch(io: Io, install_dir: []const u8, env_map: *std.process.Environ.Map
         release_cookie_content = cookie;
     }
 
+    // Code loading mode. We default to interactive (lazy) loading so the BEAM
+    // only loads and JIT-compiles modules on first use instead of eagerly at
+    // boot. For a large, long-lived editor/CLI release this is a significant
+    // startup-time win: most modules (agent/LLM stack, extension tooling, large
+    // swaths of the app) are never needed to reach first paint.
+    //
+    // Set BURRITO_BOOT_MODE=embedded to restore the old eager-loading behavior
+    // (e.g. if a missing-module-at-first-use problem surfaces). Interactive mode
+    // defers any missing-module errors from boot to first use, which is the main
+    // tradeoff to keep in mind.
+    const boot_mode_flag = blk: {
+        if (env_map.get("BURRITO_BOOT_MODE")) |mode| {
+            if (std.mem.eql(u8, mode, "embedded")) break :blk "-mode embedded";
+        }
+        break :blk "-mode interactive";
+    };
+
     // Set all the required release arguments
     const erlang_cli = &[_][]const u8{
         erl_bin_path[0..],
         "-elixir ansi_enabled true",
         "-noshell",
         "-s elixir start_cli",
-        "-mode embedded",
+        boot_mode_flag,
         "-setcookie",
         release_cookie_content,
         "-boot",
