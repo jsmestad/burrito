@@ -222,9 +222,10 @@ fn maybe_install_musl_runtime(io: Io, arena: std.mem.Allocator) !void {
     if (comptime IS_LINUX and !std.mem.eql(u8, build_options.MUSL_RUNTIME_PATH, "")) {
         // Check if the file was already extracted
         const cStr = try arena.dupeZ(u8, build_options.MUSL_RUNTIME_PATH);
-        // std.c.stat was removed in Zig 0.16.0
+        // std.c.stat and std.posix.access removed in Zig 0.16.0; open to check existence
         const file_exists: bool = blk: {
-            std.posix.access(cStr, 0) catch break :blk false;
+            const f = std.fs.openFileAbsoluteZ(cStr, .{}) catch break :blk false;
+            f.close();
             break :blk true;
         };
         if (file_exists) {
