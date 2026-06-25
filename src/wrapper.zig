@@ -238,7 +238,7 @@ fn maybe_install_musl_runtime(io: Io, arena: std.mem.Allocator) !void {
         };
         defer file.close(io);
 
-        const exec_permissions = Io.File.Permissions.unixNew(0o754);
+        const exec_permissions = Io.File.Permissions.fromMode(0o754);
         try file.setPermissions(io, exec_permissions);
 
         const MUSL_RUNTIME_BYTES = @embedFile("musl-runtime.so");
